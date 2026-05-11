@@ -1,0 +1,19 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: examproject
+  ai:
+
+# Agent 配置
+agent:
+  workspace: /IdeaProjects/myAiProject   # Agent的工作根目录
+  max-iterations: 30        # 最大循环次数（防无限循环）
+  command-timeout: 60       # 命令执行超时(秒)
+  allowed-paths:            # 安全白名单：只允许操作这些目录
+    - /IdeaProjects/myAiProject
+  blocked-commands:         # 危险命令黑名单
+    - "rm -rf /"
+    - "sudo"
+    - "chmod 777"
