@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 import org.alphalius.examproject.config.WorkspaceConfig;
+import org.alphalius.examproject.core.strategy.contextshortstrategy.SummaryMessageHook;
 import org.alphalius.examproject.hooks.ToolObserver;
 import org.alphalius.examproject.interceptor.ToolMonitorInterceptor;
 import org.alphalius.examproject.tools.DirectoryTool;
@@ -182,6 +183,7 @@ public class TaskExecutionAgent {
         this.chatClient = ReactAgent.builder()
             .name("TaskExecutionAgent")
             .model(chatModel)
+            .hooks(new SummaryMessageHook(8192,chatModel))
             // FormatOutputHook 已禁用，在 system prompt 中已明确要求 Markdown 输出
             // .hooks(new FormatOutputHook())
             .interceptors(new ToolObserver())
