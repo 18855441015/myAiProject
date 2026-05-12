@@ -2,12 +2,13 @@ package org.alphalius.examproject.core.supervisoragents;
 
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
-import com.anthropic.client.AnthropicClient;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 import org.alphalius.examproject.config.WorkspaceConfig;
+import org.alphalius.examproject.hooks.ToolObserver;
 import org.alphalius.examproject.interceptor.ToolMonitorInterceptor;
 import org.alphalius.examproject.tools.DirectoryTool;
 import org.alphalius.examproject.tools.FileOperateTool;
@@ -18,10 +19,8 @@ import org.springframework.ai.anthropic.AnthropicChatOptions;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.content.Content;
 import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 
@@ -39,8 +38,13 @@ import reactor.core.publisher.Flux;
 @Component
 public class TaskExecutionAgent {
 
-    private final ReactAgent chatClient;
+    private ReactAgent chatClient;
     private final WorkspaceConfig workspaceConfig;
+    private String currentApiKey = "your api key";
+    private String currentModel = "MiniMax-M2.7";
+
+    // 保存工具引用，用于重建 chatClient
+    private final ToolCallback[] toolCallbacks;
 
     // 当前会话的消息历史
     private final List<Message> conversationHistory = new ArrayList<>();
@@ -55,26 +59,11 @@ public class TaskExecutionAgent {
     ) {
         this.workspaceConfig = workspaceConfig;
 
-        // 将所有工具注册到ChatClient
-        ToolCallback[] fileCallbacks = ToolCallbacks.from(fileTool,directoryTool,shellTool,gitTool);
+        // 保存工具引用
+        this.toolCallbacks = ToolCallbacks.from(fileTool, directoryTool, shellTool, gitTool);
 
-        AnthropicChatModel chatModel = AnthropicChatModel.builder()
-            .options(AnthropicChatOptions.builder()
-                .model("MiniMax-M2.7")
-                .baseUrl("https://api.minimaxi.com/anthropic")
-                .apiKey("your api key")
-                .temperature(0.1)
-                .maxTokens(8192)
-                .build())
-            .build();
-
-        this.chatClient = ReactAgent.builder()
-            .name("TaskExecutionAgent")
-            .model(chatModel)
-            .systemPrompt(buildSystemPrompt())
-            .tools(Arrays.stream(fileCallbacks).toList())
-            .interceptors(new ToolMonitorInterceptor())
-            .build();
+        // 初始化 chatClient
+        rebuildChatClient();
     }
 
     /**
@@ -109,20 +98,40 @@ public class TaskExecutionAgent {
      */
     public Flux<String> executeStream(String userTask) {
         conversationHistory.add(new UserMessage(userTask));
+        log.info("executeStream called with task: {}, history size: {}", userTask, conversationHistory.size());
 
         try {
-            return chatClient
+            StringBuilder modelResp = new StringBuilder();
+            Flux<String> flux = chatClient
                     .streamMessages(conversationHistory)
                     .map(message -> {
                         String text = message.getText();
+                        log.info("streamMessages got text: {}", text);
                         return text != null ? text : "";
                     })
                     .filter(text -> !text.isEmpty())
                     // 过滤掉工具调用日志
                     .filter(text -> !text.startsWith("执行工具:"))
                     .filter(text -> !text.matches("工具 .* 执行成功.*"))
-                    .filter(text -> !text.matches("工具 .* 执行失败.*"));
+                    .filter(text -> !text.matches("工具 .* 执行失败.*"))
+                    .doOnNext(text -> {
+                        log.info("After filters, emitting: {}", text);
+                        modelResp.append(text);
+                    })
+                    .concatWithValues("[DONE]")
+                    .doOnError(error -> {
+                        log.error("Error in Flux stream", error);
+                        conversationHistory.add(new AssistantMessage("Stream error: " + error));
+                    })
+                    .doOnComplete(() -> {
+                        log.info("Flux stream completed");
+                        conversationHistory.add(new AssistantMessage(modelResp.toString()));
+                    });
+
+            log.info("Flux created, returning");
+            return flux;
         } catch (GraphRunnerException e) {
+            log.error("GraphRunnerException in executeStream", e);
             throw new RuntimeException(e);
         }
     }
@@ -133,6 +142,55 @@ public class TaskExecutionAgent {
     public void reset() {
         conversationHistory.clear();
         log.info("对话历史已清空");
+    }
+
+    /**
+     * 更新配置（API Key 和模型）
+     */
+    public void updateConfig(Map<String, String> config) {
+        if (config == null) return;
+
+        String apiKey = config.get("apiKey");
+        String model = config.get("model");
+
+        if (apiKey != null && !apiKey.isEmpty()) {
+            this.currentApiKey = apiKey;
+            log.info("API Key 已更新");
+        }
+        if (model != null && !model.isEmpty()) {
+            this.currentModel = model;
+            log.info("模型已更新为: {}", model);
+        }
+
+        // 如果有新的配置，重新创建 chatClient
+        if ((apiKey != null && !apiKey.isEmpty()) || model != null && !model.isEmpty()) {
+            rebuildChatClient();
+        }
+    }
+
+    private void rebuildChatClient() {
+        AnthropicChatModel chatModel = AnthropicChatModel.builder()
+            .options(AnthropicChatOptions.builder()
+                .model(currentModel)
+                .baseUrl("https://api.minimaxi.com/anthropic")
+                .apiKey(currentApiKey)
+                .temperature(0.1)
+                .maxTokens(8192)
+                .build())
+            .build();
+
+        this.chatClient = ReactAgent.builder()
+            .name("TaskExecutionAgent")
+            .model(chatModel)
+            // FormatOutputHook 已禁用，在 system prompt 中已明确要求 Markdown 输出
+            // .hooks(new FormatOutputHook())
+            .interceptors(new ToolObserver())
+            .systemPrompt(buildSystemPrompt())
+            .tools(Arrays.stream(toolCallbacks).toList())
+            .interceptors(new ToolMonitorInterceptor())
+            .build();
+
+        log.info("ChatClient 已重建，模型: {}, API Key: {}", currentModel, currentApiKey != null ? "****" : "null");
     }
 
     /**
@@ -181,6 +239,8 @@ public class TaskExecutionAgent {
                 所有相对路径都基于此目录。创建项目时在此目录下创建子目录。
 
                 ## 输出风格
+                - 使用 **Markdown** 格式输出，包括标题、列表、代码块、表格等
+                - 代码块必须指定语言类型，如 ```java, ```bash 等
                 - 执行过程中简要说明你在做什么（一行即可）
                 - 最终给出完整的执行总结
                 - 如果有需要用户手动操作的步骤（如配置API密钥），明确列出

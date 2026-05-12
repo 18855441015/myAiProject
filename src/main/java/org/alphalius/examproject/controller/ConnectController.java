@@ -48,16 +48,36 @@ public class ConnectController {
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter stream(@RequestBody Map<String, Object> req) {
         String task = (String) req.get("message");
-        log.info("Stream request received for task: {}", task);
+        @SuppressWarnings("unchecked")
+        Map<String, String> config = (Map<String, String>) req.get("config");
+        log.info("Stream request received for task: {}, config: {}", task, config);
 
         SseEmitter emitter = new SseEmitter(Long.MAX_VALUE);
+
+        // 添加超时处理
+        emitter.onTimeout(() -> {
+            log.warn("SSE emitter timeout");
+            emitter.complete();
+        });
+
+        // 更新 Agent 配置
+        if (config != null) {
+            reactAgent.updateConfig(config);
+        }
 
         reactAgent.executeStream(task)
                 .subscribe(
                         data -> {
                             log.info("Sending SSE data: {}", data);
                             try {
-                                emitter.send("data: " + data + "\n\n");
+                                // 正确处理多行数据：每行都要用 data: 开头
+                                String[] lines = data.split("\n");
+                                StringBuilder sseData = new StringBuilder();
+                                for (String line : lines) {
+                                    sseData.append("data: ").append(line).append("\n");
+                                }
+                                sseData.append("\n");
+                                emitter.send(sseData.toString());
                             } catch (IOException e) {
                                 log.error("Failed to send SSE data", e);
                                 emitter.completeWithError(e);
