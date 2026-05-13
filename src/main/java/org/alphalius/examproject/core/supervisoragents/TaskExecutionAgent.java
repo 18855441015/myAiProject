@@ -22,6 +22,7 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 
@@ -41,7 +42,7 @@ public class TaskExecutionAgent {
 
     private ReactAgent chatClient;
     private final WorkspaceConfig workspaceConfig;
-    private String currentApiKey = "your api key";
+    private String currentApiKey = "your llm key";
     private String currentModel = "MiniMax-M2.7";
 
     // 保存工具引用，用于重建 chatClient
@@ -56,12 +57,23 @@ public class TaskExecutionAgent {
             DirectoryTool directoryTool,
             ShellExecutionTool shellTool,
             GitTool gitTool,
+            ToolCallbackProvider toolCallbackProvider,
             WorkspaceConfig workspaceConfig
     ) {
         this.workspaceConfig = workspaceConfig;
 
         // 保存工具引用
-        this.toolCallbacks = ToolCallbacks.from(fileTool, directoryTool, shellTool, gitTool);
+        List<ToolCallback> allTools = new ArrayList<>();
+
+        List<ToolCallback> localTools = Arrays.stream(
+            ToolCallbacks.from(fileTool, directoryTool, shellTool, gitTool)).toList();
+        List<ToolCallback> mcpTools = Arrays.stream(
+            toolCallbackProvider.getToolCallbacks()).toList();
+
+        allTools.addAll(localTools);
+        allTools.addAll(mcpTools);
+        this.toolCallbacks = allTools.toArray(new ToolCallback[0]);
+
 
         // 初始化 chatClient
         rebuildChatClient();

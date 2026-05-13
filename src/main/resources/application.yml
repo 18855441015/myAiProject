@@ -5,6 +5,15 @@ spring:
   application:
     name: examproject
   ai:
+    mcp:
+      client:
+        enabled: true
+        name: my-mcp-client
+        version: 1.0.0
+        request-timeout: 30s
+        type: ASYNC
+        stdio:
+            servers-configuration: classpath:/tavily-mcp-server.json
 
 # Agent 配置
 agent:
