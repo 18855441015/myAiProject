@@ -4,7 +4,7 @@
       "command": "npx",
       "args": ["-y", "tavily-mcp@0.1.2"],
       "env": {
-        "TAVILY_API_KEY": "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"
+        "TAVILY_API_KEY": "your key"
       }
     }
   }
