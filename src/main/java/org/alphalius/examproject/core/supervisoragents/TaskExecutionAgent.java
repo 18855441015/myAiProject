@@ -1,25 +1,28 @@
 package org.alphalius.examproject.core.supervisoragents;
 
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
+import com.alibaba.cloud.ai.graph.agent.hook.Hook;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
+import org.alphalius.examproject.config.ChatModelProvider;
 import org.alphalius.examproject.config.WorkspaceConfig;
+import org.alphalius.examproject.core.evolution.PromptEvolutionService;
 import org.alphalius.examproject.core.strategy.contextshortstrategy.SummaryMessageHook;
+import org.alphalius.examproject.hooks.SelfEvolveHook;
 import org.alphalius.examproject.hooks.ToolObserver;
 import org.alphalius.examproject.interceptor.ToolMonitorInterceptor;
 import org.alphalius.examproject.tools.DirectoryTool;
 import org.alphalius.examproject.tools.FileOperateTool;
 import org.alphalius.examproject.tools.GitTool;
 import org.alphalius.examproject.tools.ShellExecutionTool;
-import org.springframework.ai.anthropic.AnthropicChatModel;
-import org.springframework.ai.anthropic.AnthropicChatOptions;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
@@ -42,14 +45,19 @@ public class TaskExecutionAgent {
 
     private ReactAgent chatClient;
     private final WorkspaceConfig workspaceConfig;
-    private String currentApiKey = "your llm key";
-    private String currentModel = "MiniMax-M2.7";
+    private final ChatModelProvider chatModelProvider;
 
-    // 保存工具引用，用于重建 chatClient
+    // 工具注入
     private final ToolCallback[] toolCallbacks;
+
+    // Hook注入
+    private final Hook[] hooks;
 
     // 当前会话的消息历史
     private final List<Message> conversationHistory = new ArrayList<>();
+
+    // Prompt自进化服务
+    private final PromptEvolutionService evolutionService;
 
     public TaskExecutionAgent(
             // 注入所有自定义工具
@@ -57,10 +65,16 @@ public class TaskExecutionAgent {
             DirectoryTool directoryTool,
             ShellExecutionTool shellTool,
             GitTool gitTool,
+            SelfEvolveHook selfEvolveHook,
+            SummaryMessageHook summaryMessageHook,
             ToolCallbackProvider toolCallbackProvider,
-            WorkspaceConfig workspaceConfig
+            WorkspaceConfig workspaceConfig,
+            PromptEvolutionService evolutionService,
+            ChatModelProvider chatModelProvider
     ) {
         this.workspaceConfig = workspaceConfig;
+        this.evolutionService = evolutionService;
+        this.chatModelProvider = chatModelProvider;
 
         // 保存工具引用
         List<ToolCallback> allTools = new ArrayList<>();
@@ -74,6 +88,9 @@ public class TaskExecutionAgent {
         allTools.addAll(mcpTools);
         this.toolCallbacks = allTools.toArray(new ToolCallback[0]);
 
+        this.hooks = new Hook[]{
+            selfEvolveHook,summaryMessageHook
+        };
 
         // 初始化 chatClient
         rebuildChatClient();
@@ -96,13 +113,25 @@ public class TaskExecutionAgent {
             // 将助手回复加入历史
             conversationHistory.add(new AssistantMessage(result));
 
+            // 仅记录任务执行情况
+            recordTask(userTask, true, result);
+
             log.info("=== 任务执行完成 ===");
             return result;
 
         } catch (Exception e) {
             log.error("任务执行失败", e);
+            // 仅记录任务（标记失败）
+            recordTask(userTask, false, e.getMessage());
             return "任务执行失败: " + e.getMessage();
         }
+    }
+
+    /**
+     * 记录任务执行情况（仅记录，由Hook触发进化分析）
+     */
+    private void recordTask(String userTask, boolean success, String finalOutput) {
+        evolutionService.recordTask(userTask, success, finalOutput);
     }
 
     /**
@@ -134,11 +163,17 @@ public class TaskExecutionAgent {
                     .concatWithValues("[DONE]")
                     .doOnError(error -> {
                         log.error("Error in Flux stream", error);
-                        conversationHistory.add(new AssistantMessage("Stream error: " + error));
+                        String errorMsg = "Stream error: " + error;
+                        conversationHistory.add(new AssistantMessage(errorMsg));
+                        // 仅记录任务
+                        recordTask(userTask, false, errorMsg);
                     })
                     .doOnComplete(() -> {
                         log.info("Flux stream completed");
-                        conversationHistory.add(new AssistantMessage(modelResp.toString()));
+                        String finalOutput = modelResp.toString();
+                        conversationHistory.add(new AssistantMessage(finalOutput));
+                        // 仅记录任务
+                        recordTask(userTask, true, finalOutput);
                     });
 
             log.info("Flux created, returning");
@@ -157,45 +192,13 @@ public class TaskExecutionAgent {
         log.info("对话历史已清空");
     }
 
-    /**
-     * 更新配置（API Key 和模型）
-     */
-    public void updateConfig(Map<String, String> config) {
-        if (config == null) return;
-
-        String apiKey = config.get("apiKey");
-        String model = config.get("model");
-
-        if (apiKey != null && !apiKey.isEmpty()) {
-            this.currentApiKey = apiKey;
-            log.info("API Key 已更新");
-        }
-        if (model != null && !model.isEmpty()) {
-            this.currentModel = model;
-            log.info("模型已更新为: {}", model);
-        }
-
-        // 如果有新的配置，重新创建 chatClient
-        if ((apiKey != null && !apiKey.isEmpty()) || model != null && !model.isEmpty()) {
-            rebuildChatClient();
-        }
-    }
-
     private void rebuildChatClient() {
-        AnthropicChatModel chatModel = AnthropicChatModel.builder()
-            .options(AnthropicChatOptions.builder()
-                .model(currentModel)
-                .baseUrl("https://api.minimaxi.com/anthropic")
-                .apiKey(currentApiKey)
-                .temperature(0.1)
-                .maxTokens(8192)
-                .build())
-            .build();
+        ChatModel chatModel = chatModelProvider.getExecutionModel();
 
         this.chatClient = ReactAgent.builder()
             .name("TaskExecutionAgent")
             .model(chatModel)
-            .hooks(new SummaryMessageHook(8192,chatModel))
+            .hooks(hooks)
             // FormatOutputHook 已禁用，在 system prompt 中已明确要求 Markdown 输出
             // .hooks(new FormatOutputHook())
             .interceptors(new ToolObserver())
@@ -204,7 +207,7 @@ public class TaskExecutionAgent {
             .interceptors(new ToolMonitorInterceptor())
             .build();
 
-        log.info("ChatClient 已重建，模型: {}, API Key: {}", currentModel, currentApiKey != null ? "****" : "null");
+        log.info("ChatClient 已重建");
     }
 
     /**

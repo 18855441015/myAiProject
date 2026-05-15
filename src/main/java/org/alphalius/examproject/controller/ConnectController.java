@@ -48,9 +48,6 @@ public class ConnectController {
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter stream(@RequestBody Map<String, Object> req) {
         String task = (String) req.get("message");
-        @SuppressWarnings("unchecked")
-        Map<String, String> config = (Map<String, String>) req.get("config");
-        log.info("Stream request received for task: {}, config: {}", task, config);
 
         SseEmitter emitter = new SseEmitter(Long.MAX_VALUE);
 
@@ -59,11 +56,6 @@ public class ConnectController {
             log.warn("SSE emitter timeout");
             emitter.complete();
         });
-
-        // 更新 Agent 配置
-        if (config != null) {
-            reactAgent.updateConfig(config);
-        }
 
         reactAgent.executeStream(task)
                 .subscribe(

@@ -17,6 +17,9 @@ spring:
 
 # Agent 配置
 agent:
+  api-key: "your api key"
+  model: "MiniMax-M2.7"
+  base-url: "https://api.minimaxi.com/anthropic"
   workspace: /Users/dw   # Agent的工作根目录
   max-iterations: 30        # 最大循环次数（防无限循环）
   command-timeout: 60       # 命令执行超时(秒)
@@ -24,3 +27,4 @@ agent:
     - /
   blocked-commands:         # 危险命令黑名单（为空表示不禁用任何命令）
     - "rm -rf /"
+  max-summary-token: 8096   # 生成摘要时最大使用token数

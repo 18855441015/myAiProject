@@ -2,6 +2,7 @@ package org.alphalius.examproject.core.strategy.contextshortstrategy;
 
 import com.alibaba.cloud.ai.graph.KeyStrategy;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
+import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.agent.hook.HookPosition;
 import com.alibaba.cloud.ai.graph.agent.hook.HookPositions;
 import com.alibaba.cloud.ai.graph.agent.hook.JumpTo;
@@ -12,6 +13,8 @@ import com.alibaba.cloud.ai.graph.agent.interceptor.ModelInterceptor;
 import com.alibaba.cloud.ai.graph.agent.interceptor.ToolInterceptor;
 import java.util.List;
 import java.util.Map;
+import lombok.extern.slf4j.Slf4j;
+import org.alphalius.examproject.config.ChatModelProvider;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -20,6 +23,8 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.tool.ToolCallback;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
 
 /**
  * 精简上下文策略 - 生成摘要
@@ -30,17 +35,20 @@ import org.springframework.ai.tool.ToolCallback;
  * @author liushuang
  * @since 2026/5/12 14:22
  */
+@Slf4j
+@Component
 @HookPositions({HookPosition.BEFORE_MODEL})
 public class SummaryMessageHook extends MessagesModelHook {
 
     private static final int MAX_SUMMARY_LENGTH = 2000;
 
-    private final Integer maxToken;
+    @Value("${agent.max-summary-token}")
+    private Integer maxToken;
+
     private final ChatModel summarizationModel;
 
-    public SummaryMessageHook(Integer maxToken, ChatModel summarizationModel) {
-        this.maxToken = maxToken;
-        this.summarizationModel = summarizationModel;
+    public SummaryMessageHook(ChatModelProvider chatModelProvider) {
+        this.summarizationModel = chatModelProvider.getSummaryModel();
     }
 
     @Override
@@ -61,11 +69,12 @@ public class SummaryMessageHook extends MessagesModelHook {
         }
 
         // 分离最近消息和历史消息
-        Message recentMessage = previousMessages.get(previousMessages.size() - 1);
+        Message recentMessage = previousMessages.getLast();
         List<Message> oldMessages = previousMessages.subList(0, previousMessages.size() - 1);
 
         // 生成摘要
         String summary = generateSummarization(oldMessages);
+        log.info("================生成对话摘要：{}",summary);
         SystemMessage summaryMessage = new SystemMessage("【对话摘要】" + summary);
 
         // 用摘要替换旧消息，只保留摘要 + 最近消息
@@ -89,13 +98,17 @@ public class SummaryMessageHook extends MessagesModelHook {
         }
 
         // 调用模型生成摘要
-        String summaryPrompt = "请简洁地总结以下对话的核心内容，保留关键信息和结论：\n\n" + conversation;
-
-        ChatResponse response = summarizationModel.call(
-            new Prompt(new UserMessage(summaryPrompt))
-        );
+        String prompt = buildSystemPrompt() + conversation;
+        ChatResponse response = summarizationModel.call(new Prompt(new UserMessage(prompt)));
 
         return response.getResult().getOutput().getText();
+    }
+
+    private String buildSystemPrompt() {
+        return """
+            你是一个助手，请简洁地总结以下对话的核心内容，保留关键信息和结论，生成一个有效的摘要,
+            请勿生成任何多余的文本，只返回摘要。
+            """;
     }
 
     /**
@@ -104,12 +117,16 @@ public class SummaryMessageHook extends MessagesModelHook {
     private String formatConversation(List<Message> messages) {
         StringBuilder sb = new StringBuilder();
         for (Message msg : messages) {
-            String role = switch (msg) {
-                case AssistantMessage am -> "助手";
-                case UserMessage um -> "用户";
-                case SystemMessage sm -> "系统";
-                default -> msg.getMessageType().name();
-            };
+            String role;
+            if (msg instanceof AssistantMessage) {
+                role = "助手";
+            } else if (msg instanceof UserMessage) {
+                role = "用户";
+            } else if (msg instanceof SystemMessage) {
+                role = "系统";
+            } else {
+                role = msg.getMessageType().name();
+            }
             sb.append(role).append("：").append(msg.getText()).append("\n");
         }
         return sb.toString();
